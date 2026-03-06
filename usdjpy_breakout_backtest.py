@@ -63,7 +63,7 @@ def load_csv(path: str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"必要列が不足しています: {missing}")
 
-    # Dukascopy系の "03.10.2025 00:00:00.000 GMT+0900" 形式に対応
+    # Dukascopy系 "03.10.2025 00:00:00.000 GMT+0900"
     if df["time"].astype(str).str.contains("GMT", na=False).any():
         df["time"] = df["time"].astype(str).str.replace(" GMT+0900", "", regex=False)
         df["time"] = pd.to_datetime(
@@ -86,21 +86,23 @@ def load_csv(path: str) -> pd.DataFrame:
 # Helper
 # =========================
 def allowed_session(ts: pd.Timestamp) -> bool:
-    hour = ts.hour
-
-    # 東京 8-11
-    if 8 <= hour <= 11:
-        return True
-
-    # 欧米時間 15-23
-    if 15 <= hour <= 23:
-        return True
-
-    return False
+    # v1.8: 東京のみ
+    return 8 <= ts.hour <= 11
 
 
 def is_tokyo_session(ts: pd.Timestamp) -> bool:
     return 8 <= ts.hour <= 11
+
+
+def allowed_entry_hour(ts: pd.Timestamp) -> bool:
+    # v1.8: 8, 9, 10時のみ
+    return ts.hour in (8, 9, 10)
+
+
+def session_name_from_time(ts: pd.Timestamp) -> str:
+    if 8 <= ts.hour <= 11:
+        return "Tokyo"
+    return "Other"
 
 
 def get_h1_bias(df_h1: Optional[pd.DataFrame], t: pd.Timestamp) -> str:
@@ -230,7 +232,7 @@ def analyze_at(
     lookback: int,
     min_touches_break_side: int = 2,
     min_range_pips: float = 15.0,
-    max_range_pips: float = 70.0,
+    max_range_pips: float = 44.0,
     require_structure: bool = False,
     require_h1_bias: bool = False,
     use_candle_filter: bool = False,
@@ -255,7 +257,7 @@ def analyze_at(
     range_width = range_high - range_low
     range_width_pips = range_width / 0.01
 
-    # レンジ幅制限 15〜70pips
+    # v1.8: 15〜44pips
     if not (min_range_pips <= range_width_pips <= max_range_pips):
         return None
 
@@ -289,8 +291,8 @@ def analyze_at(
                 return None
 
         score = 0
-        score += 30  # breakout close
-        score += min(touches_high * 8, 24)  # 触った回数
+        score += 30
+        score += min(touches_high * 8, 24)
         score += 12 if higher_lows else 0
         score += 8 if bias_h1 == "UP" else 0
         score += 5 if current_close > float(last["ema20"]) else 0
@@ -350,7 +352,7 @@ def analyze_at(
                 return None
 
         score = 0
-        score += 30  # breakout close
+        score += 30
         score += min(touches_low * 8, 24)
         score += 12 if lower_highs else 0
         score += 8 if bias_h1 == "DOWN" else 0
@@ -400,12 +402,8 @@ def analyze_at(
 # Backtest Helpers
 # =========================
 def choose_tp_mode(score: int) -> str:
-    # v1.5a: 厳しすぎてTPモード未選択にならないよう閾値を緩和
-    if score >= 65:
-        return "TP3"   # 50pips
-    if score >= 50:
-        return "TP2"   # 30pips
-    return "TP1"       # 20pips
+    # v1.8: TP50固定
+    return "TP3"
 
 
 def initial_followthrough_ok(
@@ -413,7 +411,6 @@ def initial_followthrough_ok(
     start_i: int,
     sig: Signal,
     tokyo_follow_pips: float = 3.0,
-    west_hold_break: bool = True,
 ) -> bool:
     if start_i + 1 >= len(df_m15):
         return False
@@ -422,40 +419,18 @@ def initial_followthrough_ok(
     next_close = float(nxt["close"])
 
     # 東京時間は3pips以上の追随を要求
-    if is_tokyo_session(sig.time):
-        follow = tokyo_follow_pips * 0.01
-        if sig.direction == "UP":
-            return next_close >= sig.entry + follow
-        return next_close <= sig.entry - follow
-
-    # 欧米は「次足終値がブレイク水準の外に残る」だけ確認
-    if west_hold_break:
-        if sig.direction == "UP":
-            return next_close >= sig.range_high
-        return next_close <= sig.range_low
-
-    return True
-
-
-def session_name_from_time(ts: pd.Timestamp) -> str:
-    h = ts.hour
-    if 8 <= h <= 11:
-        return "Tokyo"
-    if 15 <= h <= 23:
-        return "West"
-    return "Other"
+    follow = tokyo_follow_pips * 0.01
+    if sig.direction == "UP":
+        return next_close >= sig.entry + follow
+    return next_close <= sig.entry - follow
 
 
 def simulate_trade(df_m15: pd.DataFrame, start_i: int, sig: Signal, tp_mode: str) -> Optional[Trade]:
     entry = float(sig.entry)
     sl = float(sig.sl)
 
-    if tp_mode == "TP3":
-        tp = float(sig.tp3)
-    elif tp_mode == "TP2":
-        tp = float(sig.tp2)
-    else:
-        tp = float(sig.tp1)
+    # v1.8: TP50固定
+    tp = float(sig.tp3)
 
     for j in range(start_i + 1, len(df_m15)):
         r = df_m15.iloc[j]
@@ -611,7 +586,14 @@ def backtest(
             continue
 
         current_time = pd.Timestamp(df_m15.iloc[i]["time"])
+
+        # v1.8: 東京のみ
         if not allowed_session(current_time):
+            i += 1
+            continue
+
+        # v1.8: 8, 9, 10時のみ
+        if not allowed_entry_hour(current_time):
             i += 1
             continue
 
@@ -622,7 +604,7 @@ def backtest(
             lookback=lookback,
             min_touches_break_side=2,
             min_range_pips=15.0,
-            max_range_pips=44.0,        # v1.7: 15-44 pips
+            max_range_pips=44.0,
             require_structure=False,
             require_h1_bias=False,
             use_candle_filter=False,
@@ -631,7 +613,7 @@ def backtest(
             i += 1
             continue
 
-        # v1.7: touch 2-3 のみ採用
+        # v1.8: touch 2-3 のみ採用
         max_touch = max(sig.touches_high, sig.touches_low)
         if max_touch not in (2, 3):
             i += 1
@@ -644,7 +626,6 @@ def backtest(
             start_i=i,
             sig=sig,
             tokyo_follow_pips=3.0,
-            west_hold_break=True,
         ):
             i += 1
             continue
@@ -731,6 +712,9 @@ def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
         })
 
     out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
     return out.sort_values(["trades", "win_rate"], ascending=[False, False]).reset_index(drop=True)
 
 
@@ -743,16 +727,13 @@ def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     df["entry_time"] = pd.to_datetime(df["entry_time"])
     df["exit_time"] = pd.to_datetime(df["exit_time"])
 
-    # 念のため再生成
     df["entry_hour"] = df["entry_time"].dt.hour
     df["weekday"] = df["entry_time"].dt.day_name()
     df["session"] = df["entry_time"].apply(session_name_from_time)
 
-    # touch代表値
     df["max_touch"] = df[["touches_high", "touches_low"]].max(axis=1)
     df["min_touch"] = df[["touches_high", "touches_low"]].min(axis=1)
 
-    # touch帯
     def touch_bucket(x: float) -> str:
         if pd.isna(x):
             return "unknown"
@@ -766,7 +747,6 @@ def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
     df["touch_bucket"] = df["max_touch"].apply(touch_bucket)
 
-    # range帯
     df["range_bucket"] = pd.cut(
         df["range_width_pips"],
         bins=[15, 25, 35, 45, 55, 71],
@@ -775,7 +755,6 @@ def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         include_lowest=True
     )
 
-    # 掛け合わせ
     df["session_touch"] = df["session"].astype(str) + "_" + df["touch_bucket"].astype(str)
     df["session_range"] = df["session"].astype(str) + "_" + df["range_bucket"].astype(str)
     df["touch_range"] = df["touch_bucket"].astype(str) + "_" + df["range_bucket"].astype(str)
@@ -805,7 +784,7 @@ def main():
     ap.add_argument("--h1", default=None, help="1時間足CSV")
     ap.add_argument("--lookback", type=int, default=20)
     ap.add_argument("--cooldown", type=int, default=8)
-    ap.add_argument("--out", default="trades_v15a_analysis.csv")
+    ap.add_argument("--out", default="trades_v18_tokyo_8_10_tp50.csv")
     args = ap.parse_args()
 
     df_m15 = load_csv(args.m15)
@@ -825,7 +804,7 @@ def main():
         cooldown_bars=args.cooldown,
     )
 
-    print("=== Backtest Summary (v1.5a + analysis) ===")
+    print("=== Backtest Summary (v1.8 Tokyo 8-10 + touch2-3 + range15-44 + TP50) ===")
     for k, v in summary.items():
         print(f"{k:22s}: {v}")
 
@@ -843,6 +822,10 @@ def main():
         if not tables["by_session"].empty:
             print(tables["by_session"].to_string(index=False))
 
+        print("\n=== Analysis: by_entry_hour ===")
+        if not tables["by_entry_hour"].empty:
+            print(tables["by_entry_hour"].to_string(index=False))
+
         print("\n=== Analysis: by_touch_bucket ===")
         if not tables["by_touch_bucket"].empty:
             print(tables["by_touch_bucket"].to_string(index=False))
@@ -851,13 +834,9 @@ def main():
         if not tables["by_range_bucket"].empty:
             print(tables["by_range_bucket"].to_string(index=False))
 
-        print("\n=== Analysis: by_session_touch ===")
-        if not tables["by_session_touch"].empty:
-            print(tables["by_session_touch"].to_string(index=False))
-
-        print("\n=== Analysis: by_session_range ===")
-        if not tables["by_session_range"].empty:
-            print(tables["by_session_range"].to_string(index=False))
+        print("\n=== Analysis: by_tp_mode ===")
+        if not tables["by_tp_mode"].empty:
+            print(tables["by_tp_mode"].to_string(index=False))
 
     print(f"\nTrades saved: {args.out}")
 
@@ -876,6 +855,7 @@ def main():
             "touches_high",
             "touches_low",
             "session",
+            "entry_hour",
             "h1_bias",
         ]
         print(df_tr.tail(10)[cols].to_string(index=False))
