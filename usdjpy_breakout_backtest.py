@@ -207,7 +207,7 @@ def analyze_at(
     df_h1: Optional[pd.DataFrame],
     i: int,
     lookback: int,
-    min_touches: int = 3,
+    min_touches: int = 4,
     min_range_pips: float = 15.0,
     max_range_pips: float = 70.0,
 ) -> Optional[Signal]:
