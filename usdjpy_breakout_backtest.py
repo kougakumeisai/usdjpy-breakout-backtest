@@ -38,7 +38,6 @@ def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
 
     rename_map = {
-        # English
         "Time": "time",
         "Date": "time",
         "Datetime": "time",
@@ -48,7 +47,6 @@ def load_csv(path: str) -> pd.DataFrame:
         "Low": "low",
         "Close": "close",
         "Volume": "volume",
-        # Japanese
         "チャート日時": "time",
         "始値": "open",
         "高値": "high",
@@ -63,7 +61,7 @@ def load_csv(path: str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"必要列が不足しています: {missing}")
 
-    # Dukascopy系 "03.10.2025 00:00:00.000 GMT+0900"
+    # Dukascopy形式対応: 03.10.2025 00:00:00.000 GMT+0900
     if df["time"].astype(str).str.contains("GMT", na=False).any():
         df["time"] = df["time"].astype(str).str.replace(" GMT+0900", "", regex=False)
         df["time"] = pd.to_datetime(
@@ -86,17 +84,13 @@ def load_csv(path: str) -> pd.DataFrame:
 # Helper
 # =========================
 def allowed_session(ts: pd.Timestamp) -> bool:
-    # v1.8: 東京のみ
-    return 8 <= ts.hour <= 11
-
-
-def is_tokyo_session(ts: pd.Timestamp) -> bool:
+    # v1.9: 東京のみ
     return 8 <= ts.hour <= 11
 
 
 def allowed_entry_hour(ts: pd.Timestamp) -> bool:
-    # v1.8: 8, 9, 10時のみ
-    return ts.hour in (8, 9, 10)
+    # v1.9: 8時、9時のみ
+    return ts.hour in (8, 9)
 
 
 def session_name_from_time(ts: pd.Timestamp) -> str:
@@ -231,7 +225,7 @@ def analyze_at(
     i: int,
     lookback: int,
     min_touches_break_side: int = 2,
-    min_range_pips: float = 15.0,
+    min_range_pips: float = 25.0,
     max_range_pips: float = 44.0,
     require_structure: bool = False,
     require_h1_bias: bool = False,
@@ -247,7 +241,6 @@ def analyze_at(
     if np.isnan(atr_now):
         return None
 
-    # 現在足を除外した直前レンジ
     window = sub.iloc[-(lookback + 1):-1].copy()
     if len(window) < lookback:
         return None
@@ -257,7 +250,7 @@ def analyze_at(
     range_width = range_high - range_low
     range_width_pips = range_width / 0.01
 
-    # v1.8: 15〜44pips
+    # v1.9: 25〜44pips
     if not (min_range_pips <= range_width_pips <= max_range_pips):
         return None
 
@@ -273,7 +266,6 @@ def analyze_at(
     broke_up_close = current_close > range_high
     broke_dn_close = current_close < range_low
 
-    # Long
     if broke_up_close:
         if touches_high < min_touches_break_side:
             return None
@@ -334,7 +326,6 @@ def analyze_at(
             lower_ratio=round(lower_ratio, 4),
         )
 
-    # Short
     if broke_dn_close:
         if touches_low < min_touches_break_side:
             return None
@@ -402,7 +393,7 @@ def analyze_at(
 # Backtest Helpers
 # =========================
 def choose_tp_mode(score: int) -> str:
-    # v1.8: TP50固定
+    # v1.9: TP50固定
     return "TP3"
 
 
@@ -418,7 +409,6 @@ def initial_followthrough_ok(
     nxt = df_m15.iloc[start_i + 1]
     next_close = float(nxt["close"])
 
-    # 東京時間は3pips以上の追随を要求
     follow = tokyo_follow_pips * 0.01
     if sig.direction == "UP":
         return next_close >= sig.entry + follow
@@ -428,9 +418,7 @@ def initial_followthrough_ok(
 def simulate_trade(df_m15: pd.DataFrame, start_i: int, sig: Signal, tp_mode: str) -> Optional[Trade]:
     entry = float(sig.entry)
     sl = float(sig.sl)
-
-    # v1.8: TP50固定
-    tp = float(sig.tp3)
+    tp = float(sig.tp3)  # v1.9: TP50固定
 
     for j in range(start_i + 1, len(df_m15)):
         r = df_m15.iloc[j]
@@ -587,12 +575,10 @@ def backtest(
 
         current_time = pd.Timestamp(df_m15.iloc[i]["time"])
 
-        # v1.8: 東京のみ
         if not allowed_session(current_time):
             i += 1
             continue
 
-        # v1.8: 8, 9, 10時のみ
         if not allowed_entry_hour(current_time):
             i += 1
             continue
@@ -603,7 +589,7 @@ def backtest(
             i=i,
             lookback=lookback,
             min_touches_break_side=2,
-            min_range_pips=15.0,
+            min_range_pips=25.0,
             max_range_pips=44.0,
             require_structure=False,
             require_h1_bias=False,
@@ -613,7 +599,7 @@ def backtest(
             i += 1
             continue
 
-        # v1.8: touch 2-3 のみ採用
+        # v1.9: touch 2-3 のみ
         max_touch = max(sig.touches_high, sig.touches_low)
         if max_touch not in (2, 3):
             i += 1
@@ -714,7 +700,6 @@ def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-
     return out.sort_values(["trades", "win_rate"], ascending=[False, False]).reset_index(drop=True)
 
 
@@ -732,7 +717,6 @@ def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     df["session"] = df["entry_time"].apply(session_name_from_time)
 
     df["max_touch"] = df[["touches_high", "touches_low"]].max(axis=1)
-    df["min_touch"] = df[["touches_high", "touches_low"]].min(axis=1)
 
     def touch_bucket(x: float) -> str:
         if pd.isna(x):
@@ -784,7 +768,7 @@ def main():
     ap.add_argument("--h1", default=None, help="1時間足CSV")
     ap.add_argument("--lookback", type=int, default=20)
     ap.add_argument("--cooldown", type=int, default=8)
-    ap.add_argument("--out", default="trades_v18_tokyo_8_10_tp50.csv")
+    ap.add_argument("--out", default="trades_v19_tokyo_8_9_range25_44_tp50.csv")
     args = ap.parse_args()
 
     df_m15 = load_csv(args.m15)
@@ -804,7 +788,7 @@ def main():
         cooldown_bars=args.cooldown,
     )
 
-    print("=== Backtest Summary (v1.8 Tokyo 8-10 + touch2-3 + range15-44 + TP50) ===")
+    print("=== Backtest Summary (v1.9 Tokyo 8-9 + touch2-3 + range25-44 + TP50) ===")
     for k, v in summary.items():
         print(f"{k:22s}: {v}")
 
@@ -834,9 +818,9 @@ def main():
         if not tables["by_range_bucket"].empty:
             print(tables["by_range_bucket"].to_string(index=False))
 
-        print("\n=== Analysis: by_tp_mode ===")
-        if not tables["by_tp_mode"].empty:
-            print(tables["by_tp_mode"].to_string(index=False))
+        print("\n=== Analysis: by_h1_bias ===")
+        if not tables["by_h1_bias"].empty:
+            print(tables["by_h1_bias"].to_string(index=False))
 
     print(f"\nTrades saved: {args.out}")
 
