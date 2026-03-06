@@ -240,6 +240,11 @@ def analyze_at(
 
     touches_high = count_touches(window, range_high, atr_now, "high")
     touches_low = count_touches(window, range_low, atr_now, "low")
+    if max(touches_high, touches_low) < 4:
+        return None
+
+    if min(touches_high, touches_low) < 2:
+        return None
     higher_lows, lower_highs = detect_structure(window)
     bias_h1 = get_h1_bias(df_h1, pd.Timestamp(last["time"]))
 
@@ -377,7 +382,7 @@ def initial_followthrough_ok(df_m15: pd.DataFrame, start_i: int, sig: Signal) ->
             return next_close >= sig.entry + 0.03
         return next_close <= sig.entry - 0.03
 
-    # それ以外は従来どおり、レンジ外維持を確認
+    # それ以外はレンジ外維持を確認
     if sig.direction == "UP":
         return next_close >= sig.range_high
     return next_close <= sig.range_low
@@ -535,6 +540,87 @@ def backtest(
     }
     return df_tr, summary
 
+def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for key, g in df.groupby(group_col, dropna=False):
+        trades = len(g)
+        wins = g[g["result_pips"] > 0]["result_pips"].sum()
+        losses = -g[g["result_pips"] < 0]["result_pips"].sum()
+        pf = (wins / losses) if losses > 0 else float("inf")
+        win_rate = (g["result_pips"] > 0).mean() * 100.0
+        avg_pips = g["result_pips"].mean()
+
+        rows.append({
+            group_col: key,
+            "trades": trades,
+            "win_rate": round(float(win_rate), 1),
+            "profit_factor": round(float(pf), 2) if pf != float("inf") else "INF",
+            "avg_pips": round(float(avg_pips), 2),
+            "total_pips": round(float(g["result_pips"].sum()), 1),
+        })
+
+    out = pd.DataFrame(rows)
+    return out.sort_values("trades", ascending=False).reset_index(drop=True)
+
+
+def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    if df_tr.empty:
+        return {}
+
+    df = df_tr.copy()
+
+    # 時刻列をdatetime化
+    df["entry_time"] = pd.to_datetime(df["entry_time"])
+    df["exit_time"] = pd.to_datetime(df["exit_time"])
+
+    # 時間帯
+    def session_name(ts: pd.Timestamp) -> str:
+        h = ts.hour
+        if 8 <= h <= 11:
+            return "Tokyo"
+        if 15 <= h <= 20:
+            return "London"
+        if 21 <= h <= 23:
+            return "NY"
+        return "Other"
+
+    df["entry_hour"] = df["entry_time"].dt.hour
+    df["weekday"] = df["entry_time"].dt.day_name()
+    df["session"] = df["entry_time"].apply(session_name)
+
+    # touchの代表値
+    df["max_touch"] = df[["touches_high", "touches_low"]].max(axis=1)
+    df["min_touch"] = df[["touches_high", "touches_low"]].min(axis=1)
+
+    # touch帯
+    df["touch_bucket"] = pd.cut(
+        df["max_touch"],
+        bins=[0, 3, 4, 5, 99],
+        labels=["<=3", "4", "5", "6+"],
+        right=True
+    )
+
+    # レンジ幅帯
+    df["range_bucket"] = pd.cut(
+        df["range_width_pips"],
+        bins=[0, 15, 20, 30, 40, 50, 70, 999],
+        labels=["<=15", "15-20", "20-30", "30-40", "40-50", "50-70", "70+"],
+        right=True
+    )
+
+    tables = {
+        "by_session": summarize_group(df, "session"),
+        "by_weekday": summarize_group(df, "weekday"),
+        "by_direction": summarize_group(df, "direction"),
+        "by_tp_mode": summarize_group(df, "tp_mode"),
+        "by_touch_bucket": summarize_group(df, "touch_bucket"),
+        "by_range_bucket": summarize_group(df, "range_bucket"),
+        "by_entry_hour": summarize_group(df, "entry_hour"),
+    }
+    return tables
 
 # =========================
 # Main
@@ -545,7 +631,7 @@ def main():
     ap.add_argument("--h1", default=None, help="1時間足CSV")
     ap.add_argument("--lookback", type=int, default=20)
     ap.add_argument("--cooldown", type=int, default=8)
-    ap.add_argument("--out", default="trades_v15.csv")
+    ap.add_argument("--out", default="trades_v16.csv")
     args = ap.parse_args()
 
     df_m15 = load_csv(args.m15)
@@ -565,11 +651,31 @@ def main():
         cooldown_bars=args.cooldown,
     )
 
-    print("=== Backtest Summary (v1.5 session+followthrough+TP20/30/50) ===")
+    print("=== Backtest Summary (v1.6 session+followthrough+TP20/30/50) ===")
     for k, v in summary.items():
         print(f"{k:22s}: {v}")
 
     df_tr.to_csv(args.out, index=False, encoding="utf-8-sig")
+        # 分析テーブル作成
+    tables = build_analysis_tables(df_tr)
+
+    if tables:
+        for name, table in tables.items():
+            out_name = f"analysis_{name}.csv"
+            table.to_csv(out_name, index=False, encoding="utf-8-sig")
+            print(f"Saved: {out_name}")
+
+        print("\n=== Analysis: by_session ===")
+        if not tables["by_session"].empty:
+            print(tables["by_session"].to_string(index=False))
+
+        print("\n=== Analysis: by_touch_bucket ===")
+        if not tables["by_touch_bucket"].empty:
+            print(tables["by_touch_bucket"].to_string(index=False))
+
+        print("\n=== Analysis: by_range_bucket ===")
+        if not tables["by_range_bucket"].empty:
+            print(tables["by_range_bucket"].to_string(index=False))
     print(f"\nTrades saved: {args.out}")
 
     if not df_tr.empty:
