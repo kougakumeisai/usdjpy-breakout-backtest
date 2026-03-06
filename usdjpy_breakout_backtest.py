@@ -123,7 +123,13 @@ def get_h1_bias(df_h1: Optional[pd.DataFrame], t: pd.Timestamp) -> str:
     return "NEUTRAL"
 
 
-def count_touches(window: pd.DataFrame, level: float, atr_now: float, side: str, tol_ratio: float = 0.15) -> int:
+def count_touches(
+    window: pd.DataFrame,
+    level: float,
+    atr_now: float,
+    side: str,
+    tol_ratio: float = 0.15
+) -> int:
     tol = max(atr_now * tol_ratio, 0.03)
 
     if side == "high":
@@ -179,6 +185,12 @@ class Signal:
     range_width_pips: float
     touches_high: int
     touches_low: int
+    h1_bias: str
+    higher_lows: bool
+    lower_highs: bool
+    body_ratio: float
+    upper_ratio: float
+    lower_ratio: float
 
 
 @dataclass
@@ -197,6 +209,15 @@ class Trade:
     range_width_pips: float
     touches_high: int
     touches_low: int
+    session: str
+    entry_hour: int
+    weekday: str
+    h1_bias: str
+    higher_lows: bool
+    lower_highs: bool
+    body_ratio: float
+    upper_ratio: float
+    lower_ratio: float
 
 
 # =========================
@@ -207,11 +228,14 @@ def analyze_at(
     df_h1: Optional[pd.DataFrame],
     i: int,
     lookback: int,
-    min_touches: int = 4,
+    min_touches_break_side: int = 2,
     min_range_pips: float = 15.0,
     max_range_pips: float = 70.0,
+    require_structure: bool = False,
+    require_h1_bias: bool = False,
+    use_candle_filter: bool = False,
 ) -> Optional[Signal]:
-    if i < max(lookback + 2, 60):
+    if i < max(lookback + 2, 20):
         return None
 
     sub = df_m15.iloc[: i + 1]
@@ -240,11 +264,7 @@ def analyze_at(
 
     touches_high = count_touches(window, range_high, atr_now, "high")
     touches_low = count_touches(window, range_low, atr_now, "low")
-    if max(touches_high, touches_low) < 4:
-        return None
 
-    if min(touches_high, touches_low) < 2:
-        return None
     higher_lows, lower_highs = detect_structure(window)
     bias_h1 = get_h1_bias(df_h1, pd.Timestamp(last["time"]))
 
@@ -253,23 +273,28 @@ def analyze_at(
 
     # Long
     if broke_up_close:
-        if touches_high < min_touches:
-            return None
-        if not higher_lows:
-            return None
-        if upper_ratio > 0.25:
-            return None
-        if body_ratio < 0.45:
-            return None
-        if bias_h1 != "UP":
+        if touches_high < min_touches_break_side:
             return None
 
+        if require_structure and not higher_lows:
+            return None
+
+        if require_h1_bias and bias_h1 != "UP":
+            return None
+
+        if use_candle_filter:
+            if upper_ratio > 0.35:
+                return None
+            if body_ratio < 0.30:
+                return None
+
         score = 0
-        score += 25  # breakout
-        score += min(touches_high * 5, 30)
-        score += 15  # structure
-        score += 10  # candle quality
-        score += 10 if current_close > float(last["ema20"]) else 0
+        score += 30  # breakout close
+        score += min(touches_high * 8, 24)  # 触った回数
+        score += 12 if higher_lows else 0
+        score += 8 if bias_h1 == "UP" else 0
+        score += 5 if current_close > float(last["ema20"]) else 0
+        score += 5 if body_ratio >= 0.50 else 0
 
         entry = current_close
 
@@ -281,7 +306,6 @@ def analyze_at(
         if risk <= 0:
             return None
 
-        # TP: 20 / 30 / 50 pips
         tp1 = entry + 0.20
         tp2 = entry + 0.30
         tp3 = entry + 0.50
@@ -300,27 +324,38 @@ def analyze_at(
             range_width_pips=round(range_width_pips, 1),
             touches_high=touches_high,
             touches_low=touches_low,
+            h1_bias=bias_h1,
+            higher_lows=higher_lows,
+            lower_highs=lower_highs,
+            body_ratio=round(body_ratio, 4),
+            upper_ratio=round(upper_ratio, 4),
+            lower_ratio=round(lower_ratio, 4),
         )
 
     # Short
     if broke_dn_close:
-        if touches_low < min_touches:
-            return None
-        if not lower_highs:
-            return None
-        if lower_ratio > 0.25:
-            return None
-        if body_ratio < 0.45:
-            return None
-        if bias_h1 != "DOWN":
+        if touches_low < min_touches_break_side:
             return None
 
+        if require_structure and not lower_highs:
+            return None
+
+        if require_h1_bias and bias_h1 != "DOWN":
+            return None
+
+        if use_candle_filter:
+            if lower_ratio > 0.35:
+                return None
+            if body_ratio < 0.30:
+                return None
+
         score = 0
-        score += 25  # breakout
-        score += min(touches_low * 5, 30)
-        score += 15  # structure
-        score += 10  # candle quality
-        score += 10 if current_close < float(last["ema20"]) else 0
+        score += 30  # breakout close
+        score += min(touches_low * 8, 24)
+        score += 12 if lower_highs else 0
+        score += 8 if bias_h1 == "DOWN" else 0
+        score += 5 if current_close < float(last["ema20"]) else 0
+        score += 5 if body_ratio >= 0.50 else 0
 
         entry = current_close
 
@@ -332,7 +367,6 @@ def analyze_at(
         if risk <= 0:
             return None
 
-        # TP: 20 / 30 / 50 pips
         tp1 = entry - 0.20
         tp2 = entry - 0.30
         tp3 = entry - 0.50
@@ -351,6 +385,12 @@ def analyze_at(
             range_width_pips=round(range_width_pips, 1),
             touches_high=touches_high,
             touches_low=touches_low,
+            h1_bias=bias_h1,
+            higher_lows=higher_lows,
+            lower_highs=lower_highs,
+            body_ratio=round(body_ratio, 4),
+            upper_ratio=round(upper_ratio, 4),
+            lower_ratio=round(lower_ratio, 4),
         )
 
     return None
@@ -359,17 +399,22 @@ def analyze_at(
 # =========================
 # Backtest Helpers
 # =========================
-def choose_tp_mode(score: int) -> Optional[str]:
-    if score >= 85:
+def choose_tp_mode(score: int) -> str:
+    # v1.5a: 厳しすぎてTPモード未選択にならないよう閾値を緩和
+    if score >= 65:
         return "TP3"   # 50pips
-    if score >= 70:
+    if score >= 50:
         return "TP2"   # 30pips
-    if score >= 60:
-        return "TP1"   # 20pips
-    return None
+    return "TP1"       # 20pips
 
 
-def initial_followthrough_ok(df_m15: pd.DataFrame, start_i: int, sig: Signal) -> bool:
+def initial_followthrough_ok(
+    df_m15: pd.DataFrame,
+    start_i: int,
+    sig: Signal,
+    tokyo_follow_pips: float = 3.0,
+    west_hold_break: bool = True,
+) -> bool:
     if start_i + 1 >= len(df_m15):
         return False
 
@@ -378,14 +423,27 @@ def initial_followthrough_ok(df_m15: pd.DataFrame, start_i: int, sig: Signal) ->
 
     # 東京時間は3pips以上の追随を要求
     if is_tokyo_session(sig.time):
+        follow = tokyo_follow_pips * 0.01
         if sig.direction == "UP":
-            return next_close >= sig.entry + 0.03
-        return next_close <= sig.entry - 0.03
+            return next_close >= sig.entry + follow
+        return next_close <= sig.entry - follow
 
-    # それ以外はレンジ外維持を確認
-    if sig.direction == "UP":
-        return next_close >= sig.range_high
-    return next_close <= sig.range_low
+    # 欧米は「次足終値がブレイク水準の外に残る」だけ確認
+    if west_hold_break:
+        if sig.direction == "UP":
+            return next_close >= sig.range_high
+        return next_close <= sig.range_low
+
+    return True
+
+
+def session_name_from_time(ts: pd.Timestamp) -> str:
+    h = ts.hour
+    if 8 <= h <= 11:
+        return "Tokyo"
+    if 15 <= h <= 23:
+        return "West"
+    return "Other"
 
 
 def simulate_trade(df_m15: pd.DataFrame, start_i: int, sig: Signal, tp_mode: str) -> Optional[Trade]:
@@ -414,15 +472,58 @@ def simulate_trade(df_m15: pd.DataFrame, start_i: int, sig: Signal, tp_mode: str
                 exit_price = sl
                 pips = (exit_price - entry) / 0.01
                 return Trade(
-                    sig.time, t, "UP", entry, exit_price, sl, tp, round(pips, 1),
-                    "SL", sig.score, tp_mode, sig.range_width_pips, sig.touches_high, sig.touches_low
+                    entry_time=sig.time,
+                    exit_time=t,
+                    direction="UP",
+                    entry=entry,
+                    exit=exit_price,
+                    sl=sl,
+                    tp=tp,
+                    result_pips=round(pips, 1),
+                    reason="SL",
+                    score=sig.score,
+                    tp_mode=tp_mode,
+                    range_width_pips=sig.range_width_pips,
+                    touches_high=sig.touches_high,
+                    touches_low=sig.touches_low,
+                    session=session_name_from_time(sig.time),
+                    entry_hour=int(sig.time.hour),
+                    weekday=sig.time.day_name(),
+                    h1_bias=sig.h1_bias,
+                    higher_lows=sig.higher_lows,
+                    lower_highs=sig.lower_highs,
+                    body_ratio=sig.body_ratio,
+                    upper_ratio=sig.upper_ratio,
+                    lower_ratio=sig.lower_ratio,
                 )
+
             if hit_tp:
                 exit_price = tp
                 pips = (exit_price - entry) / 0.01
                 return Trade(
-                    sig.time, t, "UP", entry, exit_price, sl, tp, round(pips, 1),
-                    "TP", sig.score, tp_mode, sig.range_width_pips, sig.touches_high, sig.touches_low
+                    entry_time=sig.time,
+                    exit_time=t,
+                    direction="UP",
+                    entry=entry,
+                    exit=exit_price,
+                    sl=sl,
+                    tp=tp,
+                    result_pips=round(pips, 1),
+                    reason="TP",
+                    score=sig.score,
+                    tp_mode=tp_mode,
+                    range_width_pips=sig.range_width_pips,
+                    touches_high=sig.touches_high,
+                    touches_low=sig.touches_low,
+                    session=session_name_from_time(sig.time),
+                    entry_hour=int(sig.time.hour),
+                    weekday=sig.time.day_name(),
+                    h1_bias=sig.h1_bias,
+                    higher_lows=sig.higher_lows,
+                    lower_highs=sig.lower_highs,
+                    body_ratio=sig.body_ratio,
+                    upper_ratio=sig.upper_ratio,
+                    lower_ratio=sig.lower_ratio,
                 )
 
         else:
@@ -433,15 +534,58 @@ def simulate_trade(df_m15: pd.DataFrame, start_i: int, sig: Signal, tp_mode: str
                 exit_price = sl
                 pips = (entry - exit_price) / 0.01
                 return Trade(
-                    sig.time, t, "DOWN", entry, exit_price, sl, tp, round(pips, 1),
-                    "SL", sig.score, tp_mode, sig.range_width_pips, sig.touches_high, sig.touches_low
+                    entry_time=sig.time,
+                    exit_time=t,
+                    direction="DOWN",
+                    entry=entry,
+                    exit=exit_price,
+                    sl=sl,
+                    tp=tp,
+                    result_pips=round(pips, 1),
+                    reason="SL",
+                    score=sig.score,
+                    tp_mode=tp_mode,
+                    range_width_pips=sig.range_width_pips,
+                    touches_high=sig.touches_high,
+                    touches_low=sig.touches_low,
+                    session=session_name_from_time(sig.time),
+                    entry_hour=int(sig.time.hour),
+                    weekday=sig.time.day_name(),
+                    h1_bias=sig.h1_bias,
+                    higher_lows=sig.higher_lows,
+                    lower_highs=sig.lower_highs,
+                    body_ratio=sig.body_ratio,
+                    upper_ratio=sig.upper_ratio,
+                    lower_ratio=sig.lower_ratio,
                 )
+
             if hit_tp:
                 exit_price = tp
                 pips = (entry - exit_price) / 0.01
                 return Trade(
-                    sig.time, t, "DOWN", entry, exit_price, sl, tp, round(pips, 1),
-                    "TP", sig.score, tp_mode, sig.range_width_pips, sig.touches_high, sig.touches_low
+                    entry_time=sig.time,
+                    exit_time=t,
+                    direction="DOWN",
+                    entry=entry,
+                    exit=exit_price,
+                    sl=sl,
+                    tp=tp,
+                    result_pips=round(pips, 1),
+                    reason="TP",
+                    score=sig.score,
+                    tp_mode=tp_mode,
+                    range_width_pips=sig.range_width_pips,
+                    touches_high=sig.touches_high,
+                    touches_low=sig.touches_low,
+                    session=session_name_from_time(sig.time),
+                    entry_hour=int(sig.time.hour),
+                    weekday=sig.time.day_name(),
+                    h1_bias=sig.h1_bias,
+                    higher_lows=sig.higher_lows,
+                    lower_highs=sig.lower_highs,
+                    body_ratio=sig.body_ratio,
+                    upper_ratio=sig.upper_ratio,
+                    lower_ratio=sig.lower_ratio,
                 )
 
     return None
@@ -471,17 +615,31 @@ def backtest(
             i += 1
             continue
 
-        sig = analyze_at(df_m15, df_h1, i, lookback=lookback)
+        sig = analyze_at(
+            df_m15=df_m15,
+            df_h1=df_h1,
+            i=i,
+            lookback=lookback,
+            min_touches_break_side=2,   # v1.5a: 緩め
+            min_range_pips=15.0,
+            max_range_pips=70.0,
+            require_structure=False,    # v1.5a: 分析優先で外す
+            require_h1_bias=False,      # v1.5a: 分析優先で外す
+            use_candle_filter=False,    # v1.5a: 分析優先で外す
+        )
         if sig is None:
             i += 1
             continue
 
         tp_mode = choose_tp_mode(sig.score)
-        if tp_mode is None:
-            i += 1
-            continue
 
-        if not initial_followthrough_ok(df_m15, i, sig):
+        if not initial_followthrough_ok(
+            df_m15=df_m15,
+            start_i=i,
+            sig=sig,
+            tokyo_follow_pips=3.0,
+            west_hold_break=True,
+        ):
             i += 1
             continue
 
@@ -540,12 +698,16 @@ def backtest(
     }
     return df_tr, summary
 
+
+# =========================
+# Analysis
+# =========================
 def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
     rows = []
-    for key, g in df.groupby(group_col, dropna=False):
+    for key, g in df.groupby(group_col, dropna=False, observed=False):
         trades = len(g)
         wins = g[g["result_pips"] > 0]["result_pips"].sum()
         losses = -g[g["result_pips"] < 0]["result_pips"].sum()
@@ -563,7 +725,7 @@ def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
         })
 
     out = pd.DataFrame(rows)
-    return out.sort_values("trades", ascending=False).reset_index(drop=True)
+    return out.sort_values(["trades", "win_rate"], ascending=[False, False]).reset_index(drop=True)
 
 
 def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
@@ -572,44 +734,45 @@ def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
     df = df_tr.copy()
 
-    # 時刻列をdatetime化
     df["entry_time"] = pd.to_datetime(df["entry_time"])
     df["exit_time"] = pd.to_datetime(df["exit_time"])
 
-    # 時間帯
-    def session_name(ts: pd.Timestamp) -> str:
-        h = ts.hour
-        if 8 <= h <= 11:
-            return "Tokyo"
-        if 15 <= h <= 20:
-            return "London"
-        if 21 <= h <= 23:
-            return "NY"
-        return "Other"
-
+    # 念のため再生成
     df["entry_hour"] = df["entry_time"].dt.hour
     df["weekday"] = df["entry_time"].dt.day_name()
-    df["session"] = df["entry_time"].apply(session_name)
+    df["session"] = df["entry_time"].apply(session_name_from_time)
 
-    # touchの代表値
+    # touch代表値
     df["max_touch"] = df[["touches_high", "touches_low"]].max(axis=1)
     df["min_touch"] = df[["touches_high", "touches_low"]].min(axis=1)
 
     # touch帯
-    df["touch_bucket"] = pd.cut(
-        df["max_touch"],
-        bins=[0, 3, 4, 5, 99],
-        labels=["<=3", "4", "5", "6+"],
-        right=True
-    )
+    def touch_bucket(x: float) -> str:
+        if pd.isna(x):
+            return "unknown"
+        if x <= 1:
+            return "1"
+        if x == 2:
+            return "2"
+        if x == 3:
+            return "3"
+        return "4+"
 
-    # レンジ幅帯
+    df["touch_bucket"] = df["max_touch"].apply(touch_bucket)
+
+    # range帯
     df["range_bucket"] = pd.cut(
         df["range_width_pips"],
-        bins=[0, 15, 20, 30, 40, 50, 70, 999],
-        labels=["<=15", "15-20", "20-30", "30-40", "40-50", "50-70", "70+"],
-        right=True
+        bins=[15, 25, 35, 45, 55, 71],
+        labels=["15-24", "25-34", "35-44", "45-54", "55-70"],
+        right=False,
+        include_lowest=True
     )
+
+    # 掛け合わせ
+    df["session_touch"] = df["session"].astype(str) + "_" + df["touch_bucket"].astype(str)
+    df["session_range"] = df["session"].astype(str) + "_" + df["range_bucket"].astype(str)
+    df["touch_range"] = df["touch_bucket"].astype(str) + "_" + df["range_bucket"].astype(str)
 
     tables = {
         "by_session": summarize_group(df, "session"),
@@ -619,8 +782,13 @@ def build_analysis_tables(df_tr: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         "by_touch_bucket": summarize_group(df, "touch_bucket"),
         "by_range_bucket": summarize_group(df, "range_bucket"),
         "by_entry_hour": summarize_group(df, "entry_hour"),
+        "by_h1_bias": summarize_group(df, "h1_bias"),
+        "by_session_touch": summarize_group(df, "session_touch"),
+        "by_session_range": summarize_group(df, "session_range"),
+        "by_touch_range": summarize_group(df, "touch_range"),
     }
     return tables
+
 
 # =========================
 # Main
@@ -631,7 +799,7 @@ def main():
     ap.add_argument("--h1", default=None, help="1時間足CSV")
     ap.add_argument("--lookback", type=int, default=20)
     ap.add_argument("--cooldown", type=int, default=8)
-    ap.add_argument("--out", default="trades_v16.csv")
+    ap.add_argument("--out", default="trades_v15a_analysis.csv")
     args = ap.parse_args()
 
     df_m15 = load_csv(args.m15)
@@ -651,12 +819,12 @@ def main():
         cooldown_bars=args.cooldown,
     )
 
-    print("=== Backtest Summary (v1.6 session+followthrough+TP20/30/50) ===")
+    print("=== Backtest Summary (v1.5a + analysis) ===")
     for k, v in summary.items():
         print(f"{k:22s}: {v}")
 
     df_tr.to_csv(args.out, index=False, encoding="utf-8-sig")
-        # 分析テーブル作成
+
     tables = build_analysis_tables(df_tr)
 
     if tables:
@@ -676,6 +844,15 @@ def main():
         print("\n=== Analysis: by_range_bucket ===")
         if not tables["by_range_bucket"].empty:
             print(tables["by_range_bucket"].to_string(index=False))
+
+        print("\n=== Analysis: by_session_touch ===")
+        if not tables["by_session_touch"].empty:
+            print(tables["by_session_touch"].to_string(index=False))
+
+        print("\n=== Analysis: by_session_range ===")
+        if not tables["by_session_range"].empty:
+            print(tables["by_session_range"].to_string(index=False))
+
     print(f"\nTrades saved: {args.out}")
 
     if not df_tr.empty:
@@ -692,6 +869,8 @@ def main():
             "range_width_pips",
             "touches_high",
             "touches_low",
+            "session",
+            "h1_bias",
         ]
         print(df_tr.tail(10)[cols].to_string(index=False))
     else:
