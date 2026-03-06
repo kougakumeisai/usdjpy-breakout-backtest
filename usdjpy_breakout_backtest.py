@@ -620,14 +620,20 @@ def backtest(
             df_h1=df_h1,
             i=i,
             lookback=lookback,
-            min_touches_break_side=2,   # v1.5a: 緩め
+            min_touches_break_side=2,
             min_range_pips=15.0,
-            max_range_pips=70.0,
-            require_structure=False,    # v1.5a: 分析優先で外す
-            require_h1_bias=False,      # v1.5a: 分析優先で外す
-            use_candle_filter=False,    # v1.5a: 分析優先で外す
+            max_range_pips=44.0,        # v1.7: 15-44 pips
+            require_structure=False,
+            require_h1_bias=False,
+            use_candle_filter=False,
         )
         if sig is None:
+            i += 1
+            continue
+
+        # v1.7: touch 2-3 のみ採用
+        max_touch = max(sig.touches_high, sig.touches_low)
+        if max_touch not in (2, 3):
             i += 1
             continue
 
